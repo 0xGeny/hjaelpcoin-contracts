@@ -18,13 +18,63 @@ contract HjaelpCoin is Context, IBEP20, Ownable {
   string private _symbol;
   string private _name;
 
+  mapping (address => bool) private _isExcludedFromFee;
+  uint256 public _taxFee;
+  uint256 public _liquidityFee;
+
+  IUniswapV2Router02 public immutable uniswapV2Router;
+  address public immutable uniswapV2Pair;
+  
+  bool inSwapAndLiquify;
+  bool public swapAndLiquifyEnabled = true;
+  
+  uint256 public _maxHoldAmount;
+  uint256 public _maxTxAmount;
+  uint256 private _minTokensToAddToLiquidity;
+
+  address private providerAddress;
+
+  event SwapAndLiquifyEnabledUpdated(bool enabled);
+  event SwapAndLiquify(
+    uint256 tokensSwapped,
+    uint256 ethReceived,
+    uint256 tokensIntoLiqudity
+  );
+  
+  modifier lockTheSwap {
+    inSwapAndLiquify = true;
+    _;
+    inSwapAndLiquify = false;
+  }
+
   constructor() public {
     _name = "HjaelpCoin";
     _symbol = "Hjaelp";
     _decimals = 8;
-    _maxSupply = 10000000000 * (10 ** 8);
+    _maxSupply = 1000000000 * (10 ** 8);
     _totalSupply = _maxSupply;
     _balances[msg.sender] = _totalSupply;
+
+    _taxFee = 4;
+    _liquidityFee = 4;
+    _maxHoldAmount = 1000000 * (10 ** 8);
+    _maxTxAmount = _maxHoldAmount;
+    _minTokensToAddToLiquidity = _maxTxAmount;
+
+    providerAddress = owner();
+
+    IUniswapV2Router02 _uniswapV2Router = IUniswapV2Router02(0x05fF2B0DB69458A0750badebc4f9e13aDd608C7F);
+    // Create a uniswap pair for this new token
+    uniswapV2Pair = IUniswapV2Factory(_uniswapV2Router.factory())
+      .createPair(address(this), _uniswapV2Router.WETH());
+
+    // Set the rest of the contract variables
+    uniswapV2Router = _uniswapV2Router;
+    
+    // Exclude owner and this contract from fee
+    _isExcludedFromFee[owner()] = true;
+    _isExcludedFromFee[address(this)] = true;
+    _isExcludedFromFee[providerAddress] = true;
 
     emit Transfer(address(0), msg.sender, _totalSupply);
   }
@@ -177,29 +227,6 @@ contract HjaelpCoin is Context, IBEP20, Ownable {
     return true;
   }
 
-  /**
-   * @dev Moves tokens `amount` from `sender` to `recipient`.
-   *
-   * This is internal function is equivalent to {transfer}, and can be used to
-   * e.g. implement automatic token fees, slashing mechanisms, etc.
-   *
-   * Emits a {Transfer} event.
-   *
-   * Requirements:
-   *
-   * - `sender` cannot be the zero address.
-   * - `recipient` cannot be the zero address.
-   * - `sender` must have a balance of at least `amount`.
-   */
-  function _transfer(address sender, address recipient, uint256 amount) internal {
-    require(sender != address(0), "BEP20: transfer from the zero address");
-    require(recipient != address(0), "BEP20: transfer to the zero address");
-
-    _balances[sender] = _balances[sender].sub(amount, "BEP20: transfer amount exceeds balance");
-    _balances[recipient] = _balances[recipient].add(amount);
-    emit Transfer(sender, recipient, amount);
-  }
-
   /** @dev Creates `amount` tokens and assigns them to `account`, increasing
    * the total supply.
    *
@@ -267,4 +294,169 @@ contract HjaelpCoin is Context, IBEP20, Ownable {
     _burn(account, amount);
     _approve(account, _msgSender(), _allowances[account][_msgSender()].sub(amount, "BEP20: burn amount exceeds allowance"));
   }
+
+  function excludeFromFee(address account) public onlyOwner {
+    _isExcludedFromFee[account] = true;
+  }
+  
+  function includeInFee(address account) public onlyOwner {
+    _isExcludedFromFee[account] = false;
+  }
+  
+  function setTaxFeePercent(uint256 taxFee) external onlyOwner {
+    _taxFee = taxFee;
+  }
+  
+  function setLiquidityFeePercent(uint256 liquidityFee) external onlyOwner {
+    _liquidityFee = liquidityFee;
+  }
+
+  // unit of 0.01%
+  function setMaxHoldingPercent(uint256 maxHoldingPercent) external onlyOwner {
+    _maxHoldAmount = _totalSupply.mul(maxHoldingPercent).div(10000);
+  }
+
+  // unit of 0.01%
+  function setMaxTxPercent(uint256 maxTxPercent) external onlyOwner {
+    _maxTxAmount = _totalSupply.mul(maxTxPercent).div(10000);
+  }
+  
+  function setMinTokensToAddToLiquidity(uint256 minTokensToAddToLiquidity) external onlyOwner {
+    _minTokensToAddToLiquidity = minTokensToAddToLiquidity;
+  }
+
+  function setSwapAndLiquifyEnabled(bool _enabled) public onlyOwner {
+    swapAndLiquifyEnabled = _enabled;
+    emit SwapAndLiquifyEnabledUpdated(_enabled);
+  }
+
+  function setProviderAddress(address newProviderAddress) external onlyOwner {
+    // Remove the current provider from Tax Exclusion List.
+    includeInFee(providerAddress);
+
+    // Remove the current provider from Tax Exclusion List.
+    excludeFromFee(newProviderAddress);
+    
+    providerAddress = newProviderAddress;
+  }
+
+  /**
+   * @dev Moves tokens `amount` from `sender` to `recipient`.
+   *
+   * This is internal function is equivalent to {transfer}, and can be used to
+   * e.g. implement automatic token fees, slashing mechanisms, etc.
+   *
+   * Emits a {Transfer} event.
+   *
+   * Requirements:
+   *
+   * - `sender` cannot be the zero address.
+   * - `recipient` cannot be the zero address.
+   * - `sender` must have a balance of at least `amount`.
+   */
+  function _transfer(address sender, address recipient, uint256 amount) internal {
+    checkTxValid sender, recipient, amount);
+
+    // Take tax of transaction and transfer to the provider wallet.
+    uint256 taxFeeAmount = amount.mul(_liquidityFee).div(100);
+    _balances[providerAddress] = _balances[providerAddress].add(taxFeeAmount);
+    
+    // Take tax of transaction and add to liquidity.
+    uint256 liquidityFeeAmount = amount.mul(_liquidityFee).div(100);
+    _balances[address(this)] = _balances[address(this)].add(liquidityFeeAmount);
+
+    // is the token balance of this contract address over the min number of
+    // tokens that we need to initiate a swap + liquidity lock?
+    // also, don't get caught in a circular liquidity event.
+    // also, don't swap & liquify if sender is uniswap pair.
+    uint256 contractTokenBalance = _balances[address(this)];
+    
+    if(contractTokenBalance >= _maxTxAmount)
+    {
+      contractTokenBalance = _maxTxAmount;
+    }
+    
+    bool overMinTokenBalance = contractTokenBalance >= _minTokensToAddToLiquidity;
+    if (
+        overMinTokenBalance &&
+        !inSwapAndLiquify &&
+        from != uniswapV2Pair &&
+        swapAndLiquifyEnabled
+    ) {
+        contractTokenBalance = _minTokensToAddToLiquidity;
+        //add liquidity
+        swapAndLiquify(contractTokenBalance);
+    }
+
+    _balances[sender] = _balances[sender].sub(amount);
+    _balances[recipient] = _balances[recipient].add(amount);
+    emit Transfer(sender, recipient, amount);
+  }
+  
+  function checkTxValid(address sender, address recipient, uint256 amount) private returns (bool) {
+    require(sender != address(0), "BEP20: transfer from the zero address");
+    require(recipient != address(0), "BEP20: transfer to the zero address");
+    require(amount > 0, "Transfer amount must be greater than zero");
+    require(_balances[sender] > amount, "Transfer amount exceeds balance");
+    require(_balances[recipient].add(amount) <= _maxHoldAmount, "Recipient balance exceeds holding limit");
+    if (from != owner() && to != owner())
+      require(amount <= _maxTxAmount, "Transfer amount exceeds the maxTxAmount.");
+  }
+  
+  function swapAndLiquify(uint256 contractTokenBalance) private lockTheSwap {
+    // split the contract balance into halves
+    uint256 half = contractTokenBalance.div(2);
+    uint256 otherHalf = contractTokenBalance.sub(half);
+
+    // capture the contract's current ETH balance.
+    // this is so that we can capture exactly the amount of ETH that the
+    // swap creates, and not make the liquidity event include any ETH that
+    // has been manually sent to the contract
+    uint256 initialBalance = address(this).balance;
+
+    // swap tokens for ETH
+    swapTokensForEth(half); // <- this breaks the ETH -> HATE swap when swap+liquify is triggered
+
+    // how much ETH did we just swap into?
+    uint256 newBalance = address(this).balance.sub(initialBalance);
+
+    // add liquidity to uniswap
+    addLiquidity(otherHalf, newBalance);
+    
+    emit SwapAndLiquify(half, newBalance, otherHalf);
+  }
+
+  function swapTokensForEth(uint256 tokenAmount) private {
+    // generate the uniswap pair path of token -> weth
+    address[] memory path = new address[](2);
+    path[0] = address(this);
+    path[1] = uniswapV2Router.WETH();
+
+    _approve(address(this), address(uniswapV2Router), tokenAmount);
+
+    // make the swap
+    uniswapV2Router.swapExactTokensForETHSupportingFeeOnTransferTokens(
+      tokenAmount,
+      0, // accept any amount of ETH
+      path,
+      address(this),
+      block.timestamp
+    );
+  }
+
+  function addLiquidity(uint256 tokenAmount, uint256 ethAmount) private {
+    // approve token transfer to cover all possible scenarios
+    _approve(address(this), address(uniswapV2Router), tokenAmount);
+
+    // add the liquidity
+    uniswapV2Router.addLiquidityETH{value: ethAmount}(
+      address(this),
+      tokenAmount,
+      0, // slippage is unavoidable
+      0, // slippage is unavoidable
+      owner(),
+      block.timestamp
+    );
+  }
+
 }
