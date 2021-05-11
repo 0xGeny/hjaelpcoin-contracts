@@ -1,15 +1,21 @@
-pragma solidity 0.5.16;
+// SPDX-License-Identifier: MIT
+
+pragma solidity ^0.8.0;
 
 import "./interfaces/IBEP20.sol";
+import "./interfaces/uniswap/IUniswapV2Factory.sol";
+import "./interfaces/uniswap/IUniswapV2Pair.sol";
+import "./interfaces/uniswap/IUniswapV2Router02.sol";
 import "@openzeppelin/contracts/utils/Context.sol";
 import "@openzeppelin/contracts/utils/math/SafeMath.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
 contract HjaelpCoin is Context, IBEP20, Ownable {
   using SafeMath for uint256;
+  
+  uint256 private constant MAX = ~uint256(0);
 
   mapping (address => uint256) private _balances;
-
   mapping (address => mapping (address => uint256)) private _allowances;
 
   uint256 private _totalSupply;
@@ -47,20 +53,22 @@ contract HjaelpCoin is Context, IBEP20, Ownable {
     inSwapAndLiquify = false;
   }
 
-  constructor() public {
+  constructor() {
     _name = "HjaelpCoin";
-    _symbol = "Hjaelp";
+    _symbol = "HJAELP";
     _decimals = 8;
-    _maxSupply = 1000000000 * (10 ** 8);
-    _totalSupply = _maxSupply;
-    _balances[msg.sender] = _totalSupply;
+    _maxSupply = 1000000000 * (10 ** 8);    // Max Supply: 1B
+    _totalSupply = 0;
 
-    _taxFee = 4;
-    _liquidityFee = 4;
-    _maxHoldAmount = 1000000 * (10 ** 8);
-    _maxTxAmount = _maxHoldAmount;
-    _minTokensToAddToLiquidity = _maxTxAmount;
+    // unit of 0.01%
+    _taxFee = 400;
+    _liquidityFee = 400;
 
+    _maxHoldAmount = 1000000 * (10 ** 8);   // Holding Limit: 1M (0.1% of Total Supply)
+    _maxTxAmount = MAX;
+    _minTokensToAddToLiquidity = 100000 * (10 ** 8);    // 0.1M
+
+    // The service provider wallet that takes tax from transactions
     providerAddress = owner();
 
     IUniswapV2Router02 _uniswapV2Router = IUniswapV2Router02(0x05fF2B0DB69458A0750badebc4f9e13aDd608C7F);
@@ -76,41 +84,41 @@ contract HjaelpCoin is Context, IBEP20, Ownable {
     _isExcludedFromFee[address(this)] = true;
     _isExcludedFromFee[providerAddress] = true;
 
-    emit Transfer(address(0), msg.sender, _totalSupply);
+    _mint(owner(), _maxSupply);
   }
 
   /**
    * @dev Returns the bep token owner.
    */
-  function getOwner() external view returns (address) {
+  function getOwner() external view override returns (address) {
     return owner();
   }
 
   /**
    * @dev Returns the token decimals.
    */
-  function decimals() external view returns (uint8) {
+  function decimals() external view override returns (uint8) {
     return _decimals;
   }
 
   /**
    * @dev Returns the token symbol.
    */
-  function symbol() external view returns (string memory) {
+  function symbol() external view override returns (string memory) {
     return _symbol;
   }
 
   /**
   * @dev Returns the token name.
   */
-  function name() external view returns (string memory) {
+  function name() external view override returns (string memory) {
     return _name;
   }
 
   /**
    * @dev See {BEP20-totalSupply}.
    */
-  function totalSupply() external view returns (uint256) {
+  function totalSupply() external view override returns (uint256) {
     return _totalSupply;
   }
 
@@ -124,7 +132,7 @@ contract HjaelpCoin is Context, IBEP20, Ownable {
   /**
    * @dev See {BEP20-balanceOf}.
    */
-  function balanceOf(address account) external view returns (uint256) {
+  function balanceOf(address account) external view override returns (uint256) {
     return _balances[account];
   }
 
@@ -136,7 +144,7 @@ contract HjaelpCoin is Context, IBEP20, Ownable {
    * - `recipient` cannot be the zero address.
    * - the caller must have a balance of at least `amount`.
    */
-  function transfer(address recipient, uint256 amount) external returns (bool) {
+  function transfer(address recipient, uint256 amount) external override returns (bool) {
     _transfer(_msgSender(), recipient, amount);
     return true;
   }
@@ -144,7 +152,7 @@ contract HjaelpCoin is Context, IBEP20, Ownable {
   /**
    * @dev See {BEP20-allowance}.
    */
-  function allowance(address owner, address spender) external view returns (uint256) {
+  function allowance(address owner, address spender) external view override returns (uint256) {
     return _allowances[owner][spender];
   }
 
@@ -155,7 +163,7 @@ contract HjaelpCoin is Context, IBEP20, Ownable {
    *
    * - `spender` cannot be the zero address.
    */
-  function approve(address spender, uint256 amount) external returns (bool) {
+  function approve(address spender, uint256 amount) external override returns (bool) {
     _approve(_msgSender(), spender, amount);
     return true;
   }
@@ -172,7 +180,7 @@ contract HjaelpCoin is Context, IBEP20, Ownable {
    * - the caller must have allowance for `sender`'s tokens of at least
    * `amount`.
    */
-  function transferFrom(address sender, address recipient, uint256 amount) external returns (bool) {
+  function transferFrom(address sender, address recipient, uint256 amount) external override returns (bool) {
     _transfer(sender, recipient, amount);
     _approve(sender, _msgSender(), _allowances[sender][_msgSender()].sub(amount, "BEP20: transfer amount exceeds allowance"));
     return true;
@@ -242,6 +250,20 @@ contract HjaelpCoin is Context, IBEP20, Ownable {
     _totalSupply = _totalSupply.add(amount);
     _balances[account] = _balances[account].add(amount);
     emit Transfer(address(0), account, amount);
+  }
+
+  
+  /**
+   * @dev Destroys `amount` tokens from `account`, reducing the
+   * the total supply.
+   *
+   * Requirements
+   *
+   * - `msg.sender` must be the token owner
+   */
+  function burn(address account, uint256 amount) public onlyOwner {
+    _burn(account, amount);
+    return true;
   }
 
   /**
@@ -355,10 +377,10 @@ contract HjaelpCoin is Context, IBEP20, Ownable {
    * - `sender` must have a balance of at least `amount`.
    */
   function _transfer(address sender, address recipient, uint256 amount) internal {
-    checkTxValid sender, recipient, amount);
+    checkTxValid(sender, recipient, amount);
 
     // Take tax of transaction and transfer to the provider wallet.
-    uint256 taxFeeAmount = amount.mul(_liquidityFee).div(100);
+    uint256 taxFeeAmount = amount.mul(_taxFee).div(100);
     _balances[providerAddress] = _balances[providerAddress].add(taxFeeAmount);
     
     // Take tax of transaction and add to liquidity.
@@ -380,7 +402,7 @@ contract HjaelpCoin is Context, IBEP20, Ownable {
     if (
         overMinTokenBalance &&
         !inSwapAndLiquify &&
-        from != uniswapV2Pair &&
+        sender != uniswapV2Pair &&
         swapAndLiquifyEnabled
     ) {
         contractTokenBalance = _minTokensToAddToLiquidity;
@@ -389,17 +411,17 @@ contract HjaelpCoin is Context, IBEP20, Ownable {
     }
 
     _balances[sender] = _balances[sender].sub(amount);
-    _balances[recipient] = _balances[recipient].add(amount);
+    _balances[recipient] = _balances[recipient].add(amount.sub(taxFeeAmount).sub(liquidityFeeAmount));
     emit Transfer(sender, recipient, amount);
   }
   
-  function checkTxValid(address sender, address recipient, uint256 amount) private returns (bool) {
+  function checkTxValid(address sender, address recipient, uint256 amount) internal view {
     require(sender != address(0), "BEP20: transfer from the zero address");
     require(recipient != address(0), "BEP20: transfer to the zero address");
     require(amount > 0, "Transfer amount must be greater than zero");
     require(_balances[sender] > amount, "Transfer amount exceeds balance");
     require(_balances[recipient].add(amount) <= _maxHoldAmount, "Recipient balance exceeds holding limit");
-    if (from != owner() && to != owner())
+    if (sender != owner() && recipient != owner())
       require(amount <= _maxTxAmount, "Transfer amount exceeds the maxTxAmount.");
   }
   
