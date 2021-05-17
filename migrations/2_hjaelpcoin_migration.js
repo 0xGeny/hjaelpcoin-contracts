@@ -15,26 +15,27 @@ module.exports = async function (deployer) {
   try {
     let dataParse = {};
 
-    // // Deploy HjaelpCoin
-    // await deployer.deploy(HjaelpCoin);
-    // let hjaelpInstance = await HjaelpCoin.deployed();
-    // // Save the deployed address
-    // dataParse['HjaelpCoin'] = hjaelpInstance.address;
-    // // Mint coins to owner wallet
-    // await hjaelpInstance.mint(configs.owner, web3.utils.toBN(configs.initial_mint));
+    // Deploy HjaelpCoin
+    await deployer.deploy(HjaelpCoin);
+    let hjaelpInstance = await HjaelpCoin.deployed();
+    // Save the deployed address
+    dataParse['HjaelpCoin'] = hjaelpInstance.address;
+    // Mint coins to owner wallet
+    await hjaelpInstance.mint(configs.owner, web3.utils.toBN(configs.initial_mint));
 
-    const hjaelp = new web3.eth.Contract(hjaelpABI.abi, "0xc89413FE7e621027aCc057b653c0EF97F63A0566");
+    const uniswap_address = "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D";
+    const hjaelp = new web3.eth.Contract(hjaelpABI.abi, hjaelpInstance.address);
     const tx1 = await hjaelp.methods.approve(
-      "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D",
+      uniswap_address,
       web3.utils.toWei(configs.initial_liquidity.token)
     ).send({
       from: configs.owner
     })
     console.log("approved", tx1);
 
-    const router = new web3.eth.Contract(uniswapRouterABI.abi, "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D");
+    const router = new web3.eth.Contract(uniswapRouterABI.abi, uniswap_address);
     const tx2 = await router.methods.addLiquidityETH(
-      "0xc89413FE7e621027aCc057b653c0EF97F63A0566",
+      hjaelpInstance.address,
       web3.utils.toWei(configs.initial_liquidity.token),
       0,
       0,
