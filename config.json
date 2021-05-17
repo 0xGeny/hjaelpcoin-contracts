@@ -1,0 +1,8 @@
+{
+  "owner": "0x3e4897523ed7532e5ed064F1a7Cf15b6216fB14E",
+  "initial_mint": "1000000000000000000000000000",
+  "initial_liquidity": {
+    "eth": "1",
+    "token": "1000000"
+  }
+}

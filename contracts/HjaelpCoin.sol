@@ -14,6 +14,7 @@ contract HjaelpCoin is Context, IBEP20, Ownable {
   using SafeMath for uint256;
   
   uint256 private constant MAX = ~uint256(0);
+  address private constant routerAddress = 0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D;
 
   mapping (address => uint256) private _balances;
   mapping (address => mapping (address => uint256)) private _allowances;
@@ -56,35 +57,36 @@ contract HjaelpCoin is Context, IBEP20, Ownable {
   constructor() {
     _name = "HjaelpCoin";
     _symbol = "HJAELP";
-    _decimals = 8;
-    _maxSupply = 1000000000 * (10 ** 8);    // Max Supply: 1B
+    _decimals = 18;
+    _maxSupply = 1000000000 * (10 ** 18);    // Max Supply: 1B
     _totalSupply = 0;
 
     // unit of 0.01%
     _taxFee = 400;
     _liquidityFee = 400;
 
-    _maxHoldAmount = 1000000 * (10 ** 8);   // Holding Limit: 1M (0.1% of Total Supply)
-    _maxTxAmount = MAX;
-    _minTokensToAddToLiquidity = 100000 * (10 ** 8);    // 0.1M
+    _maxHoldAmount = 1000000 * (10 ** 18);   // Holding Limit: 1M (0.1% of Total Supply)
+    _maxTxAmount = MAX;                      // Transaction Limit (Max as default)
+    _minTokensToAddToLiquidity = 10000 * (10 ** 18);    // 0.1M
 
     // The service provider wallet that takes tax from transactions
     providerAddress = owner();
 
-    IUniswapV2Router02 _uniswapV2Router = IUniswapV2Router02(0x05fF2B0DB69458A0750badebc4f9e13aDd608C7F);
+    IUniswapV2Router02 _uniswapV2Router = IUniswapV2Router02(routerAddress);
     // Create a uniswap pair for this new token
-    uniswapV2Pair = IUniswapV2Factory(_uniswapV2Router.factory())
+    address _uniswapV2Pair = IUniswapV2Factory(_uniswapV2Router.factory())
       .createPair(address(this), _uniswapV2Router.WETH());
 
     // Set the rest of the contract variables
     uniswapV2Router = _uniswapV2Router;
+    uniswapV2Pair = _uniswapV2Pair;
     
     // Exclude owner and this contract from fee
     _isExcludedFromFee[owner()] = true;
     _isExcludedFromFee[address(this)] = true;
     _isExcludedFromFee[providerAddress] = true;
-
-    _mint(owner(), _maxSupply);
+    _isExcludedFromFee[routerAddress] = true;
+    _isExcludedFromFee[_uniswapV2Pair] = true;
   }
 
   /**
@@ -230,8 +232,8 @@ contract HjaelpCoin is Context, IBEP20, Ownable {
    *
    * - `msg.sender` must be the token owner
    */
-  function mint(uint256 amount) public onlyOwner returns (bool) {
-    _mint(_msgSender(), amount);
+  function mint(address account, uint256 amount) public onlyOwner returns (bool) {
+    _mint(account, amount);
     return true;
   }
 
@@ -263,7 +265,6 @@ contract HjaelpCoin is Context, IBEP20, Ownable {
    */
   function burn(address account, uint256 amount) public onlyOwner {
     _burn(account, amount);
-    return true;
   }
 
   /**
@@ -379,39 +380,44 @@ contract HjaelpCoin is Context, IBEP20, Ownable {
   function _transfer(address sender, address recipient, uint256 amount) internal {
     checkTxValid(sender, recipient, amount);
 
-    // Take tax of transaction and transfer to the provider wallet.
-    uint256 taxFeeAmount = amount.mul(_taxFee).div(100);
-    _balances[providerAddress] = _balances[providerAddress].add(taxFeeAmount);
-    
-    // Take tax of transaction and add to liquidity.
-    uint256 liquidityFeeAmount = amount.mul(_liquidityFee).div(100);
-    _balances[address(this)] = _balances[address(this)].add(liquidityFeeAmount);
+    uint256 totalFee = 0;
+    if (!_isExcludedFromFee[sender] && !_isExcludedFromFee[recipient]) {
+      // Take tax of transaction and transfer to the provider wallet.
+      uint256 taxFeeAmount = amount.mul(_taxFee).div(10000);
+      _balances[providerAddress] = _balances[providerAddress].add(taxFeeAmount);
+      
+      // Take tax of transaction and add to liquidity.
+      uint256 liquidityFeeAmount = amount.mul(_liquidityFee).div(10000);
+      _balances[address(this)] = _balances[address(this)].add(liquidityFeeAmount);
 
-    // is the token balance of this contract address over the min number of
-    // tokens that we need to initiate a swap + liquidity lock?
-    // also, don't get caught in a circular liquidity event.
-    // also, don't swap & liquify if sender is uniswap pair.
-    uint256 contractTokenBalance = _balances[address(this)];
-    
-    if(contractTokenBalance >= _maxTxAmount)
-    {
-      contractTokenBalance = _maxTxAmount;
+      // is the token balance of this contract address over the min number of
+      // tokens that we need to initiate a swap + liquidity lock?
+      // also, don't get caught in a circular liquidity event.
+      // also, don't swap & liquify if sender is uniswap pair.
+      uint256 contractTokenBalance = _balances[address(this)];
+      
+      if(contractTokenBalance >= _maxTxAmount)
+      {
+        contractTokenBalance = _maxTxAmount;
+      }
+      
+      bool overMinTokenBalance = contractTokenBalance >= _minTokensToAddToLiquidity;
+      if (
+          overMinTokenBalance &&
+          !inSwapAndLiquify &&
+          sender != uniswapV2Pair &&
+          swapAndLiquifyEnabled
+      ) {
+          contractTokenBalance = _minTokensToAddToLiquidity;
+          //add liquidity
+          swapAndLiquify(contractTokenBalance);
+      }
+      
+      totalFee = taxFeeAmount.add(liquidityFeeAmount);
     }
     
-    bool overMinTokenBalance = contractTokenBalance >= _minTokensToAddToLiquidity;
-    if (
-        overMinTokenBalance &&
-        !inSwapAndLiquify &&
-        sender != uniswapV2Pair &&
-        swapAndLiquifyEnabled
-    ) {
-        contractTokenBalance = _minTokensToAddToLiquidity;
-        //add liquidity
-        swapAndLiquify(contractTokenBalance);
-    }
-
     _balances[sender] = _balances[sender].sub(amount);
-    _balances[recipient] = _balances[recipient].add(amount.sub(taxFeeAmount).sub(liquidityFeeAmount));
+    _balances[recipient] = _balances[recipient].add(amount.sub(totalFee));
     emit Transfer(sender, recipient, amount);
   }
   
